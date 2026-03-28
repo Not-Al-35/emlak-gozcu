@@ -122,4 +122,11 @@ if not st.session_state.ilan_verileri.empty:
     if st.button("Tümünü Temizle"):
         st.session_state.ilan_verileri = pd.DataFrame(columns=st.session_state.ilan_verileri.columns)
         st.session_state.ilan_gorselleri = {}
-        st.rerun()
+        st.rerun
+
+import streamlit as st
+
+# Secrets içinden linki çekiyoruz
+sheet_url = st.secrets["https://docs.google.com/spreadsheets/d/1qu7K65hDkGk5amJcW6rOGURtr5KncdK1sVQdgyblvo4/edit?usp=sharing"]
+
+st.write(f"Bağlanılacak tablo: {sheet_url}")
