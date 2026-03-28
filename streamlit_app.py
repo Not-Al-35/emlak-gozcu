@@ -1,74 +1,81 @@
 import streamlit as st
 import pandas as pd
-from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync
-import time
+import os
+from datetime import datetime
 
-# Sayfa Genişliği
-st.set_page_config(page_title="Emlak Gözcü v1.0", layout="wide")
+# --- AYARLAR VE REFERANS VERİLER ---
+# Buradaki rakamları Sakarya piyasasına göre güncelleyebilirsin
+REFERANS_FIYATLAR = {
+    "Serdivan - Mavi Durak": 35000,
+    "Serdivan - Kampüs": 28000,
+    "Erenler - Merkez": 22000,
+    "Adapazarı - Yeni Camii": 25000,
+    "Sapanca - Göl Kenarı": 55000
+}
 
-# --- VERİTABANI SİMÜLASYONU (Kalıcı veritabanı için ileride Google Sheets bağlayabiliriz) ---
-if 'ilanlar_df' not in st.session_state:
-    st.session_state.ilanlar_df = pd.DataFrame(columns=['Tarih', 'İlan No', 'Başlık', 'Fiyat', 'm2', 'Birim Fiyat', 'Bina Yaşı', 'Kat', 'Link'])
+DATA_FILE = "ilanlar.csv"
 
-def veri_kazı(url):
-    with sync_playwright() as p:
-        # Streamlit Cloud'da çalışması için gerekli ayarlar
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36")
-        page = context.new_page()
-        stealth_sync(page)
-        
-        try:
-            page.goto(url, timeout=60000)
-            time.sleep(2) # Sayfanın tam yüklenmesi için kısa bir es
+# --- YARDIMCI FONKSİYONLAR ---
+def veri_yukle():
+    if os.path.exists(DATA_FILE):
+        return pd.read_csv(DATA_FILE)
+    return pd.DataFrame(columns=["Tarih", "Mahalle", "Fiyat", "m2", "Birim_Fiyat", "Skor", "Link"])
 
-            # --- SELECTORLAR (Bu kısımlar siteye göre güncellenir) ---
-            # Not: Emlakjet/Sahibinden sürekli yapı değiştirir, bu örnek bir yaklaşımdır.
-            fiyat_text = page.locator('.price').first.inner_text() if page.locator('.price').count() > 0 else "0"
-            baslik = page.title()
-            
-            # Veriyi temizleyip tabloya ekliyoruz
-            yeni_ilan = {
-                'Tarih': time.strftime("%d-%m-%Y"),
-                'İlan No': url.split('-')[-1],
-                'Başlık': baslik[:50] + "...",
-                'Fiyat': fiyat_text,
-                'm2': "135", # Örnek sabit, kazıma geliştikçe dinamik olacak
-                'Birim Fiyat': 0,
-                'Bina Yaşı': "5-10",
-                'Kat': "2",
-                'Link': url
-            }
-            return yeni_ilan
-        except Exception as e:
-            st.error(f"Veri çekilirken hata oluştu: {e}")
-            return None
-        finally:
-            browser.close()
+def veri_kaydet(df):
+    df.to_csv(DATA_FILE, index=False)
 
 # --- ARAYÜZ ---
-st.title("🏗️ Emlak Gözcü: Otomatik Veri Kazıma")
+st.set_page_config(page_title="Emlak Gözcü v1.1", layout="wide")
+st.title("🏗️ Emlak Gözcü (Scout) v1.1")
 
-url_input = st.text_input("Analiz edilecek ilan linkini buraya yapıştırın:")
+# --- VERİ GİRİŞ ALANI ---
+with st.expander("➕ Yeni İlan Ekle", expanded=True):
+    with st.form("ilan_formu"):
+        col1, col2 = st.columns(2)
+        with col1:
+            mahalle = st.selectbox("Mahalle Seçin", list(REFERANS_FIYATLAR.keys()))
+            fiyat = st.number_input("İlan Fiyatı (TL)", min_value=0, step=100000)
+        with col2:
+            m2 = st.number_input("Brüt Metrekare", min_value=1, step=1)
+            link = st.text_input("İlan Linki")
+        
+        submit = st.form_submit_button("Analiz Et ve Kaydet")
 
-if st.button("İlanı Çek ve Analiz Et"):
-    if url_input:
-        with st.spinner("Robot ilana gidiyor..."):
-            sonuc = veri_kazı(url_input)
-            if sonuc:
-                st.session_state.ilanlar_df = pd.concat([st.session_state.ilanlar_df, pd.DataFrame([sonuc])], ignore_index=True)
-                st.success("İlan başarıyla kazındı ve veritabanına eklendi!")
-
-# --- TABLO GÖRÜNÜMÜ ---
-st.subheader("📊 Kayıtlı İlanlar ve Kıyaslama Tablosu")
-if not st.session_state.ilanlar_df.empty:
-    # Tabloyu göster
-    st.dataframe(st.session_state.ilanlar_df, use_container_width=True)
+if submit:
+    birim_fiyat = fiyat / m2
+    ref_fiyat = REFERANS_FIYATLAR[mahalle]
+    # Fırsat Skoru Hesabı
+    skor = ((ref_fiyat - birim_fiyat) / ref_fiyat) * 100
     
-    # Karar Verme Analitiği
-    st.divider()
-    st.subheader("🎯 En Mantıklı Yatırım Analizi")
-    st.write("Sistem, kayıtlı ilanlar arasından fiyat/performans oranına göre sıralama yapar.")
+    yeni_veri = {
+        "Tarih": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "Mahalle": mahalle,
+        "Fiyat": fiyat,
+        "m2": m2,
+        "Birim_Fiyat": round(birim_fiyat, 2),
+        "Skor": round(skor, 1),
+        "Link": link
+    }
+    
+    df = veri_yukle()
+    df = pd.concat([df, pd.DataFrame([yeni_veri])], ignore_index=True)
+    veri_kaydet(df)
+    st.success(f"İlan Kaydedildi! Fırsat Skoru: %{skor:.1f}")
+
+# --- ANALİZ VE TABLO ---
+df_goster = veri_yukle()
+
+if not df_goster.empty:
+    st.subheader("📊 Analiz Edilen İlanlar")
+    
+    # Renklendirme Fonksiyonu
+    def highlight_skor(val):
+        color = 'red'
+        if val > 15: color = '#27ae60' # Koyu Yeşil
+        elif val > 0: color = '#2ecc71' # Açık Yeşil
+        elif val > -10: color = '#f1c40f' # Sarı
+        return f'background-color: {color}'
+
+    st.dataframe(df_goster.style.applymap(highlight_skor, subset=['Skor']))
 else:
-    st.info("Henüz ilan eklenmemiş. Yukarıdaki alana bir link yapıştırarak başlayın.")
+    st.info("Henüz ilan eklenmemiş. Yukarıdaki formu kullanarak başlayın.")
