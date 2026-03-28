@@ -79,3 +79,13 @@ if not df_goster.empty:
     st.dataframe(df_goster.style.applymap(highlight_skor, subset=['Skor']))
 else:
     st.info("Henüz ilan eklenmemiş. Yukarıdaki formu kullanarak başlayın.")
+
+# Veri ekleme kısmına şu kontrolü ekliyoruz (Fullstack yaklaşımı):
+if submit:
+    df = veri_yukle()
+    
+    if link in df['Link'].values:
+        st.warning("⚠️ Bu ilan zaten listenizde var! Güncellenmedi.")
+    else:
+        # Hesaplamalar ve Kayıt işlemi...
+        st.balloons() # Başarılı giriş efekti
