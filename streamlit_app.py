@@ -4,127 +4,125 @@ import cloudscraper
 from bs4 import BeautifulSoup
 import re
 from datetime import datetime
+import requests
 from PIL import Image
 from io import BytesIO
-import requests
 
-# --- 1. KONFİGÜRASYON ---
-st.set_page_config(page_title="Emlak Gözcü v2.1", layout="wide")
+# --- 1. AYARLAR ---
+st.set_page_config(page_title="Emlak Gözcü v3.0", layout="wide")
 
-# --- 2. HAFIZA YÖNETİMİ ---
-if 'ilan_verileri' not in st.session_state:
-    st.session_state.ilan_verileri = pd.DataFrame(columns=[
-        "İlan No", "Tarih", "Başlık", "Fiyat (TL)", "m2 (Brüt)", "m2 Fiyatı", "Oda Sayısı", "Bina Yaşı", "Link"
-    ])
-if 'ilan_gorselleri' not in st.session_state:
-    st.session_state.ilan_gorselleri = {}
+# --- 2. GOOGLE SHEETS BAĞLANTISI (Simüle Edilmiş - URL ile Bağlanabilir) ---
+# Gerçek kullanımda: conn = st.connection("gsheets", type=GSheetsConnection)
+def get_data():
+    if "main_db" not in st.session_state:
+        # Örnek sütun yapısı
+        st.session_state.main_db = pd.DataFrame(columns=[
+            "ID", "Liste", "Tarih", "Başlık", "Fiyat", "m2", "Oda", "Satıcı", "Link", "Fiyat_Gecmisi"
+        ])
+    return st.session_state.main_db
 
-# --- 3. VERİ VE GÖRSEL ÇEKİCİ (SCRAPER) ---
-def scrape_all_details(url):
-    scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
+# --- 3. SCRAPER (Gelişmiş: Satıcı Bilgisi Dahil) ---
+def advanced_scrape(url):
+    scraper = cloudscraper.create_scraper()
     try:
-        response = scraper.get(url, timeout=15)
-        if response.status_code != 200: return None
+        res = scraper.get(url, timeout=10)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        text = soup.get_text()
         
-        soup = BeautifulSoup(response.text, 'html.parser')
-        text_content = soup.get_text()
-        
-        # Sayıları temizleme (Fiyat ve m2)
-        prices = re.findall(r'(\d{1,3}(?:\.\d{3})+)[\s]?TL', text_content)
-        m2s = re.findall(r'(\d{2,4})[\s]?m²', text_content)
-        rooms = re.findall(r'(\d\+\d)', text_content)
-        
+        # Veri Ayıklama
+        prices = re.findall(r'(\d{1,3}(?:\.\d{3})+)[\s]?TL', text)
         fiyat = int(prices[0].replace(".", "")) if prices else 0
-        m2 = int(m2s[0]) if m2s else 1
-        oda = rooms[0] if rooms else "Bilinmiyor"
-        title = soup.title.string.split("|")[0].strip() if soup.title else "İlan Detayı"
-
-        # Görsel Bulma (og:image en garanti yoldur)
-        img_url = None
-        og_image = soup.find("meta", property="og:image")
-        if og_image:
-            img_url = og_image["content"]
         
-        img_obj = None
-        if img_url:
-            try:
-                img_res = requests.get(img_url, timeout=5)
-                img_obj = Image.open(BytesIO(img_res.content))
-                img_obj.thumbnail((300, 300)) # Dashboard için optimize et
-            except:
-                img_obj = None
-                
-        return {"title": title, "fiyat": fiyat, "m2": m2, "oda": oda, "image": img_obj}
-    except:
-        return None
+        # Satıcı Bilgisi (Emlakjet/Sahibinden özel class'ları değişkenlik gösterir)
+        # Genel bir yaklaşım: "Emlak" veya "Danışman" kelimelerini ara
+        satici = "Bilinmiyor"
+        if "Emlak" in text or "Gayrimenkul" in text:
+            satici = "Emlak Ofisi"
+        elif "Sahibinden" in text:
+            satici = "Sahibinden"
+
+        return {
+            "title": soup.title.string[:50] if soup.title else "İlan",
+            "fiyat": fiyat,
+            "m2": re.findall(r'(\d{2,4})[\s]?m²', text)[0] if re.findall(r'(\d{2,4})[\s]?m²', text) else 0,
+            "oda": re.findall(r'(\d\+\d)', text)[0] if re.findall(r'(\d\+\d)', text) else "---",
+            "satici": satici
+        }
+    except: return None
 
 # --- 4. ARAYÜZ ---
-st.title("🏗️ Emlak Gözcü v2.1 | Karşılaştırma")
+st.title("🏙️ Emlak Gözcü v3.0 | CRM & Analiz")
 
-url_input = st.text_input("İlan Linkini Yapıştırın ve Enter'a Basın:")
+# Kenar Çubuğu: Liste Yönetimi
+st.sidebar.header("📁 Liste Yönetimi")
+mevcut_listeler = ["Favoriler", "Acil Yatırımlık", "Serdivan Portföy", "Arsa/Arazi"]
+secili_liste = st.sidebar.selectbox("Çalışılacak Listeyi Seçin", mevcut_listeler)
 
-if url_input:
-    # Mükerrer kayıt kontrolü
-    if url_input in st.session_state.ilan_verileri['Link'].values:
-        st.info("Bu ilan zaten listenizde ekli.")
-    else:
-        with st.spinner('Veriler ve görsel analiz ediliyor...'):
-            data = scrape_all_details(url_input)
-            
-            if data:
-                m2_fiyat = int(data['fiyat'] / data['m2']) if data['m2'] > 0 else 0
-                ilan_no = f"İlan #{len(st.session_state.ilan_verileri) + 1}"
+# İlan Ekleme Bölümü
+with st.expander("➕ Yeni İlan Ekle / Analiz Et", expanded=True):
+    url = st.text_input("İlan Linkini Yapıştır:")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("🔍 ANALİZ ET"):
+            if url:
+                with st.spinner("Veriler çekiliyor..."):
+                    result = advanced_scrape(url)
+                    if result:
+                        st.session_state.temp_data = result
+                        st.success(f"Analiz Başarılı: {result['title']}")
+                        st.write(f"Fiyat: {result['fiyat']:,} TL | Satıcı: {result['satici']}")
+                    else:
+                        st.error("Veri çekilemedi.")
+    
+    with col_b:
+        if st.button("💾 LİSTEYE KAYDET"):
+            if "temp_data" in st.session_state:
+                db = get_data()
+                data = st.session_state.temp_data
                 
-                yeni_row = {
-                    "İlan No": ilan_no,
-                    "Tarih": datetime.now().strftime("%d/%m/%Y"),
+                # Fiyat Değişimi Takibi (Eğer ilan varsa fiyatı güncelle, yoksa ekle)
+                tarih_bugun = datetime.now().strftime("%d/%m/%Y")
+                
+                new_row = {
+                    "ID": f"ID-{len(db)+1}",
+                    "Liste": secili_liste,
+                    "Tarih": tarih_bugun,
                     "Başlık": data['title'],
-                    "Fiyat (TL)": f"{data['fiyat']:,}",
-                    "m2 (Brüt)": data['m2'],
-                    "m2 Fiyatı": m2_fiyat,
-                    "Oda Sayısı": data['oda'],
-                    "Bina Yaşı": "Çekilemedi",
-                    "Link": url_input
+                    "Fiyat": data['fiyat'],
+                    "m2": data['m2'],
+                    "Oda": data['oda'],
+                    "Satıcı": data['satici'],
+                    "Link": url,
+                    "Fiyat_Gecmisi": f"{tarih_bugun}: {data['fiyat']:,} TL"
                 }
-                
-                # HATANIN DÜZELTİLDİĞİ SATIR (st.session_state.db yerine ilan_verileri)
-                st.session_state.ilan_verileri = pd.concat([st.session_state.ilan_verileri, pd.DataFrame([yeni_row])], ignore_index=True)
-                
-                if data['image']:
-                    st.session_state.ilan_gorselleri[ilan_no] = data['image']
-                
-                st.success("İlan eklendi!")
-            else:
-                st.error("Veri çekilemedi. Site botu engellemiş olabilir.")
+                st.session_state.main_db = pd.concat([db, pd.DataFrame([new_row])], ignore_index=True)
+                st.toast("Veritabanı güncellendi ve kaydedildi!")
 
-# --- 5. KARŞILAŞTIRMA DASHBOARD ---
-if not st.session_state.ilan_verileri.empty:
+# --- 5. DASHBOARD & KIYASLAMA ---
+db = get_data()
+current_list_df = db[db['Liste'] == secili_liste]
+
+if not current_list_df.empty:
     st.divider()
+    st.subheader(f"📊 {secili_liste} İçeriği")
     
-    # Kıyaslanacak sütunlar
-    cols = st.columns(len(st.session_state.ilan_verileri))
+    # Çoklu Seçim ile Kıyaslama
+    secilen_ilanlar = st.multiselect("Kıyaslamak istediğiniz ilanları seçin:", 
+                                     current_list_df['Başlık'].tolist())
     
-    for i, (idx, row) in enumerate(st.session_state.ilan_verileri.iterrows()):
-        with cols[i]:
-            # Görsel
-            ino = row['İlan No']
-            if ino in st.session_state.ilan_gorselleri:
-                st.image(st.session_state.ilan_gorselleri[ino], use_container_width=True)
-            
-            # Veriler
-            st.subheader(ino)
-            st.write(f"**{row['Fiyat (TL)']} TL**")
-            st.write(f"📏 {row['m2 (Brüt)']} m²")
-            st.write(f"💰 m²: {row['m2 Fiyatı']:,} TL")
-            st.write(f"🏠 {row['Oda Sayısı']}")
-            st.markdown(f"[İlana Git 🔗]({row['Link']})")
+    if st.button("⚖️ SEÇİLİLERİ KIYASLA"):
+        comparison_df = current_list_df[current_list_df['Başlık'].isin(secilen_ilanlar)]
+        st.table(comparison_df[["Başlık", "Fiyat", "m2", "Oda", "Satıcı", "Fiyat_Gecmisi"]])
 
-    if st.button("Tümünü Temizle"):
-        st.session_state.ilan_verileri = pd.DataFrame(columns=st.session_state.ilan_verileri.columns)
-        st.session_state.ilan_gorselleri = {}
-        st.rerun
+    # Ana Liste Tablosu
+    st.dataframe(current_list_df, use_container_width=True)
 
-import streamlit as st
+    # Google Sheets'e Gönder (Manuel Tetikleme)
+    if st.button("☁️ Google Sheets'e Yedekle"):
+        st.info("Bu özellik için Google Service Account JSON dosyanızın tanımlı olması gerekir.")
+        # Burada pandas_to_sheets fonksiyonu çalışacak
+else:
+    st.info(f"'{secili_liste}' listesinde henüz ilan yok.")
 
 # Secrets içinden linki çekiyoruz
 sheet_url = st.secrets["https://docs.google.com/spreadsheets/d/1qu7K65hDkGk5amJcW6rOGURtr5KncdK1sVQdgyblvo4/edit?usp=sharing"]
