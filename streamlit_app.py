@@ -1,112 +1,185 @@
 import streamlit as st
 import pandas as pd
-import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 import re
 from datetime import datetime
+from PIL import Image
+from io import BytesIO
+import requests
 
-# --- KONFİGÜRASYON ---
-st.set_page_config(page_title="Emlak Gözcü v1.2", layout="wide")
+# --- 1. AYARLAR VE KONFİGÜRASYON ---
+st.set_page_config(page_title="Emlak Gözcü v2.0 | İlan Karşılaştırma", layout="wide")
 
-# --- VERİ TABANI (Session State - Geçici Hafıza) ---
-if 'db' not in st.session_state:
-    st.session_state.db = pd.DataFrame(columns=["Tarih", "Mahalle", "Fiyat", "m2", "Birim_Fiyat", "Skor", "Link"])
+# --- 2. HAFIZA (Session State) ---
+# Görselleri ve verileri ayrı ayrı tutuyoruz
+if 'ilan_verileri' not in st.session_state:
+    st.session_state.ilan_verileri = pd.DataFrame(columns=[
+        "İlan No", "Tarih", "Başlık", "Fiyat (TL)", "m2 (Brüt)", "m2 Fiyatı", "Oda Sayısı", "Bina Yaşı", "Bulunduğu Kat", "Isıtma", "Link"
+    ])
+if 'ilan_gorselleri' not in st.session_state:
+    st.session_state.ilan_gorselleri = {}
 
-# --- SCRAPER FONKSİYONU ---
-def scrape_listing(url):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+# --- 3. GELİŞMİŞ SCRAPER FONKSİYONU ---
+def scrape_all_details(url):
+    # Bot korumalarını aşmak için cloudscraper kullanıyoruz
+    scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
+    
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code != 200:
-            return None
+        response = scraper.get(url, timeout=15)
+        if response.status_code != 200: return None
         
         soup = BeautifulSoup(response.text, 'html.parser')
-        html_content = soup.get_text()
-
-        # Regex ile Fiyat ve m2 bulma (Çoğu sitede işe yarar genel bir yaklaşım)
-        # Not: Sitelere özel class isimleri değiştiği için "sayı yakalama" metoduna gidiyoruz.
-        prices = re.findall(r'(\d{1,3}(?:\.\d{3})*(?:\s?TL))', html_content)
-        m2_candidates = re.findall(r'(\d{2,3})\s?m²', html_content)
+        text_content = soup.get_text()
         
-        extracted_price = prices[0] if prices else "Bulunamadı"
-        extracted_m2 = m2_candidates[0] if m2_candidates else "Bulunamadı"
+        # --- A. Veri Çekme Mekanizması ---
+        # 1. Fiyat
+        prices = re.findall(r'(\d{1,3}(?:\.\d{3})+)[\s]?TL', text_content)
+        fiyat = int(prices[0].replace(".", "")) if prices else 0
         
-        return {"price": extracted_price, "m2": extracted_m2}
+        # 2. Metrekare (Genel arama)
+        m2s = re.findall(r'(\d{2,4})[\s]?m²', text_content)
+        m2 = int(m2s[0]) if m2s else 0
+        
+        # 3. Oda Sayısı (Örn: 3+1, 2+1)
+        rooms = re.findall(r'(\d\+\d)', text_content)
+        oda = rooms[0] if rooms else "Bulunamadı"
+        
+        # 4. Bina Yaşı (Örn: 5-10 arası, 0 (Yeni))
+        ages = re.findall(r'Bina Yaşı\s*:\s*([\w\s-]+)', text_content, re.IGNORECASE)
+        yas = ages[0].strip() if ages else "Bulunamadı"
+        
+        # 5. Başlık
+        title = soup.title.string.strip() if soup.title else "İlan Başlığı"
+        
+        # --- B. Görsel Çekme Mekanizması (Kritik Bölüm) ---
+        img_url = None
+        
+        # Emlakjet, Sahibinden vb. için yaygın görsel sınıflarını arıyoruz
+        # Not: Bu kısımlar sitelerin HTML yapısına göre güncellenmelidir.
+        possible_imgs = [
+            soup.find("img", {"class": re.compile(r"class|image|gallery|poster", re.IGNORECASE)}),
+            soup.find("meta", {"property": "og:image"}), # Genelde en garantisidir
+            soup.find("link", {"rel": "image_src"})
+        ]
+        
+        for img in possible_imgs:
+            if img:
+                if img.has_attr('content'): img_url = img['content']
+                elif img.has_attr('src'): img_url = img['src']
+                elif img.has_attr('data-src'): img_url = img['data-src']
+                if img_url: break
+        
+        # Eğer görsel URL'si bulduysak, onu indirip sıkıştıralım
+        img_object = None
+        if img_url:
+            try:
+                img_response = requests.get(img_url, timeout=5)
+                img_object = Image.open(BytesIO(img_response.content))
+                # Sıkıştırma (Örn: Max 200px genişlik)
+                img_object.thumbnail((200, 200)) 
+            except:
+                img_object = None # Görsel indirilemezse None dön
+                
+        return {
+            "title": title,
+            "fiyat": fiyat,
+            "m2": m2,
+            "oda": oda,
+            "yas": yas,
+            "image": img_object
+        }
     except Exception as e:
+        print(f"Hata: {e}")
         return None
 
-# --- ARAYÜZ ---
-st.title("🏗️ Emlak Gözcü (Scout) v1.2")
-st.markdown("Sadece ilan linkini yapıştırın, gerisini sisteme bırakın.")
+# --- 4. ARAYÜZ ---
+st.title("🏗️ Emlak Gözcü v2.0 | Profesyonel Kıyaslama")
+st.markdown("Seçtiğiniz ilanların linklerini yapıştırın, tüm verileri ve görselleri yan yana kıyaslayın.")
 
-# Link Giriş Alanı
-url_input = st.text_input("İlan Linkini Buraya Yapıştırın:", placeholder="https://www.emlakjet.com/ilan/...")
+# İlan Ekleme Alanı
+url_input = st.text_input("Yeni İlan Linkini Buraya Yapıştırın:")
 
 if url_input:
-    with st.spinner('Veriler analiz ediliyor...'):
-        data = scrape_listing(url_input)
-        
-        if data:
-            st.success("İlan verileri çekildi!")
+    # Aynı ilan zaten var mı kontrolü
+    if url_input in st.session_state.ilan_verileri['Link'].values:
+        st.warning("Bu ilan zaten listenizde var.")
+    else:
+        with st.spinner('İlanın tüm verileri ve görseli çekiliyor...'):
+            data = scrape_all_details(url_input)
             
-            # Form içinde düzenleme imkanı (Hatalı çekilirse elle düzeltmek için)
-            with st.form("kayit_formu"):
-                col1, col2, col3 = st.columns(3)
+            if data and data['fiyat'] > 0:
+                # Hesaplama
+                m2_fiyati = int(data['fiyat'] / data['m2']) if data['m2'] > 0 else 0
+                ilan_no = f"ILAN_{len(st.session_state.ilan_verileri) + 1}"
                 
-                # Temizleme işlemi (TL ve nokta karakterlerini atma)
-                clean_price = "".join(filter(str.isdigit, data['price'])) if data['price'] != "Bulunamadı" else 0
-                clean_m2 = "".join(filter(str.isdigit, data['m2'])) if data['m2'] != "Bulunamadı" else 0
+                # Veriyi DataFrame'e ekleme
+                yeni_ilan = {
+                    "İlan No": ilan_no,
+                    "Tarih": datetime.now().strftime("%d/%m/%Y"),
+                    "Başlık": data['title'],
+                    "Fiyat (TL)": f"{data['fiyat']:,}",
+                    "m2 (Brüt)": data['m2'],
+                    "m2 Fiyatı": m2_fiyati,
+                    "Oda Sayısı": data['oda'],
+                    "Bina Yaşı": data['yas'],
+                    "Isıtma": "Veri Çekilemedi", # Scraper'a eklenmeli
+                    "Link": url_input
+                }
+                
+                st.session_state.ilan_verileri = pd.concat([st.session_state.db, pd.DataFrame([yeni_ilan])], ignore_index=True)
+                
+                # Görseli hafızaya kaydetme
+                if data['image']:
+                    st.session_state.ilan_gorselleri[ilan_no] = data['image']
+                
+                st.success("İlan başarıyla analiz edildi ve listeye eklendi!")
+                st.balloons()
+            else:
+                st.error("Site bot korumasına takıldı veya bilgiler çekilemedi. Lütfen linki kontrol edin.")
 
-                mahalle = col1.selectbox("Bölge / Mahalle", list(REF_PRICES.keys()))
-                fiyat = col2.number_input("Tespit Edilen Fiyat (TL)", value=int(clean_price) if clean_price else 0)
-                m2 = col3.number_input("Tespit Edilen m2", value=int(clean_m2) if clean_m2 else 0)
-                
-                save_btn = st.form_submit_button("Analiz Et ve Veritabanına Ekle")
-                
-                if save_btn:
-                    if fiyat > 0 and m2 > 0:
-                        birim_fiyat = fiyat / m2
-                        ref = REF_PRICES[mahalle]
-                        skor = ((ref - birim_fiyat) / ref) * 100
-                        
-                        yeni_satir = {
-                            "Tarih": datetime.now().strftime("%d/%m/%Y"),
-                            "Mahalle": mahalle,
-                            "Fiyat": f"{fiyat:,} TL",
-                            "m2": m2,
-                            "Birim_Fiyat": int(birim_fiyat),
-                            "Skor": round(skor, 1),
-                            "Link": url_input
-                        }
-                        
-                        st.session_state.db = pd.concat([st.session_state.db, pd.DataFrame([yeni_satir])], ignore_index=True)
-                        st.balloons()
-                    else:
-                        st.error("Lütfen fiyat ve m2 bilgilerini kontrol edin.")
-        else:
-            st.error("Site bot korumasına takıldı veya bilgiler çekilemedi. Lütfen bilgileri manuel girin.")
-            # Fallback (Hata durumunda manuel form)
-            # (Buraya istersen manuel giriş formu ekleyebiliriz)
-
-# --- TABLO VE FİLTRELEME ---
-if not st.session_state.db.empty:
+# --- 5. PROFESYONEL DASHBOARD (Karşılaştırma) ---
+if not st.session_state.ilan_verileri.empty:
     st.divider()
-    st.subheader("📊 Analiz Edilen Fırsatlar")
+    st.subheader("📊 İlan Karşılaştırma Dashboard'u")
     
-    # Renklendirme mantığı
-    def color_skor(val):
-        if val > 15: color = '#27ae60' # Kelepir
-        elif val > 0: color = '#f1c40f' # Normal
-        else: color = '#e74c3c' # Pahalı
-        return f'background-color: {color}; color: white'
+    # Kıyaslanacak özellikleri seçme
+    features = st.multiselect("Kıyaslanacak Özellikleri Seçin:", 
+                                ["Fiyat (TL)", "m2 (Brüt)", "m2 Fiyatı", "Oda Sayısı", "Bina Yaşı"],
+                                default=["Fiyat (TL)", "m2 Fiyatı", "Oda Sayısı"])
+    
+    # Yan Yana Kıyaslama Kartları
+    # Her ilan için bir sütun oluşturuyoruz
+    num_ilans = len(st.session_state.ilan_verileri)
+    cols = st.columns(num_ilans)
+    
+    for i, (index, row) in enumerate(st.session_state.ilan_verileri.iterrows()):
+        ilan_no = row['İlan No']
+        
+        with cols[i]:
+            st.markdown(f"### {ilan_no}")
+            
+            # 1. Görsel Gösterimi (Eğer varsa)
+            if ilan_no in st.session_state.ilan_gorselleri:
+                st.image(st.session_state.ilan_gorselleri[ilan_no], use_column_width=True)
+            else:
+                st.info("Görsel Yok")
+                
+            # 2. Seçili Özelliklerin Gösterimi
+            for feature in features:
+                st.metric(label=feature, value=row[feature])
+            
+            # 3. İlan Linki
+            st.markdown(f"[İlana Git]({row['Link']})")
 
-    st.dataframe(
-        st.session_state.db.style.applymap(color_skor, subset=['Skor']),
-        use_container_width=True
-    )
-    
-    if st.button("Listeyi Temizle"):
-        st.session_state.db = pd.DataFrame(columns=["Tarih", "Mahalle", "Fiyat", "m2", "Birim_Fiyat", "Skor", "Link"])
+    # Temizleme Butonu
+    st.divider()
+    if st.button("Tüm Listeyi Sıfırla"):
+        st.session_state.ilan_verileri = pd.DataFrame(columns=[
+            "İlan No", "Tarih", "Başlık", "Fiyat (TL)", "m2 (Brüt)", "m2 Fiyatı", "Oda Sayısı", "Bina Yaşı", "Isıtma", "Link"
+        ])
+        st.session_state.ilan_gorselleri = {}
         st.rerun()
+
+else:
+    st.info("Henüz kıyaslanacak ilan eklenmemiş. Yukarıdaki alanı kullanarak başlayın.")
