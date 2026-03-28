@@ -89,3 +89,21 @@ if submit:
     else:
         # Hesaplamalar ve Kayıt işlemi...
         st.balloons() # Başarılı giriş efekti
+
+import requests
+from bs4 import BeautifulSoup
+
+def ilan_bilgilerini_cek(url):
+    headers = {"User-Agent": "Mozilla/5.0 ..."} # Kendimizi insan gibi tanıtıyoruz
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # ÖRNEK (Emlakjet için):
+        # Bu kısımlar sitenin HTML yapısına göre (class isimlerine göre) güncellenmeli
+        fiyat = soup.find("div", {"class": "price"}).text 
+        m2 = soup.find("div", {"class": "m2-alanı"}).text
+        
+        return fiyat, m2
+    except:
+        return None, None
